@@ -209,4 +209,7 @@ class ProjectAgent:
         torch.save(self.network.state_dict(), path)
 
     def load(self):
-        self.network.load_state_dict(torch.load("models/agent.pth"))
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.network.load_state_dict(
+            torch.load("models/agent.pth", map_location=torch.device(device))
+        )
