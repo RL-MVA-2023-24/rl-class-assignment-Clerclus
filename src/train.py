@@ -202,7 +202,10 @@ class ProjectAgent:
         return episode_return, MC_avg_discounted_reward, MC_avg_total_reward
 
     def act(self, observation, use_random=False):
-        return 0
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        with torch.no_grad():
+            Q = self.network(torch.Tensor(observation).unsqueeze(0).to(device))
+            return torch.argmax(Q).item()
 
     def save(self, path):
         # path = "models/agent.pth"
