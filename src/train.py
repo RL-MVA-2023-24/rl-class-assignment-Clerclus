@@ -36,19 +36,30 @@ class ReplayBuffer:
 
 
 config = {
-    "nb_neurons": 64,
+    "nb_neurons": 128,
     "lr": 1e-4,
+    "weight_decay": 2e-6,
     "gamma": 0.95,
-    "buffer_size": 1e5,
+    "buffer_size": 2e4,
     "epsilon_min": 0.01,
     "epsilon_max": 1.0,
-    "epsilon_decay_period": 100 * 200,
-    "epsilon_delay_decay": 5 * 200,
-    "batch_size": 32,
+    "epsilon_decay_period": 500 * 200,
+    "epsilon_delay_decay": 8 * 200,
+    "batch_size": 64,
     "monitoring_nb_trials": 0,
     "nb_gradient_steps": 1,
-    "update_target_freq": 50,
+    "update_target_freq": 500,
 }
+
+
+def features(state):
+    # = np.array([self.T1, self.T1star, self.T2, self.T2star, self.V, self.E]) = static
+    T1, T1star, T2, T2star, V, E = state
+    p1 = T1 * V
+    p2 = T2 * V
+    p1star = T1star * E
+    p2star = T2star * E
+    return np.array([p1, p1star, p2, p2star, T1, T1star, T2, T2star, V, E])
 
 
 class ProjectAgent:
@@ -63,7 +74,7 @@ class ProjectAgent:
         self.batch_size = config["batch_size"]
 
         self.network = torch.nn.Sequential(
-            nn.Linear(6, nb_neurons),
+            nn.Linear(10, nb_neurons),
             nn.ReLU(),
             nn.Linear(nb_neurons, nb_neurons),
             nn.ReLU(),
@@ -84,7 +95,11 @@ class ProjectAgent:
         self.monitoring_nb_trials = config["monitoring_nb_trials"]
 
         self.criterion = torch.nn.SmoothL1Loss()
-        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=config["lr"])
+        self.optimizer = torch.optim.Adam(
+            self.network.parameters(),
+            lr=config["lr"],
+            weight_decay=config["weight_decay"],
+        )
 
     def MC_eval(self, env, nb_trials):
         MC_total_reward = []
@@ -133,6 +148,7 @@ class ProjectAgent:
         episode = 0
         episode_cum_reward = 0
         state, _ = env.reset()
+        state = features(state)
         epsilon = self.epsilon_max
         step = 0
 
@@ -157,6 +173,7 @@ class ProjectAgent:
 
             # step
             next_state, reward, done, trunc, _ = env.step(action)
+            next_state = features(next_state)
             self.memory.append(state, action, reward, next_state, done)
             episode_cum_reward += reward
 
@@ -195,6 +212,7 @@ class ProjectAgent:
                     )
                 episode += 1
                 state, _ = env.reset()
+                state = features(state)
                 episode_cum_reward = 0
             else:
                 state = next_state
@@ -202,9 +220,10 @@ class ProjectAgent:
         return episode_return, MC_avg_discounted_reward, MC_avg_total_reward
 
     def act(self, observation, use_random=False):
+        obs = features(observation)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with torch.no_grad():
-            Q = self.network(torch.Tensor(observation).unsqueeze(0).to(device))
+            Q = self.network(torch.Tensor(obs).unsqueeze(0).to(device))
             return torch.argmax(Q).item()
 
     def save(self, path):
