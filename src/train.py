@@ -1,59 +1,64 @@
-import random
-
-from loguru import logger
+import gymnasium as gym
 import numpy as np
-from copy import deepcopy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from gymnasium.wrappers import TimeLimit
+from torch.distributions import Categorical
 
 from env_hiv import HIVPatient
 
-env = TimeLimit(env=HIVPatient(domain_randomization=False), max_episode_steps=200)
+N = 14
+env = gym.vector.AsyncVectorEnv(
+    [
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=False), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=True), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=True), max_episode_steps=200
+        ),
+        lambda: TimeLimit(
+            env=HIVPatient(domain_randomization=True), max_episode_steps=200
+        ),
+    ],
+    shared_memory=False,
+)
 
 
-class ReplayBuffer:
-    def __init__(self, capacity, device):
-        self.capacity = int(capacity)
-        self.data = []
-        self.index = 0
-        self.device = device
-
-    def append(self, s, a, r, s_, d):
-        if len(self.data) < self.capacity:
-            self.data.append(None)
-        self.data[self.index] = (s, a, r, s_, d)
-        self.index = (self.index + 1) % self.capacity
-
-    def sample(self, batch_size):
-        batch = random.sample(self.data, batch_size)
-        return list(
-            map(lambda x: torch.Tensor(np.array(x)).to(self.device), list(zip(*batch)))
-        )
-
-    def __len__(self):
-        return len(self.data)
-
-
-config = {
-    "nb_neurons": 128,
-    "lr": 1e-4,
-    "weight_decay": 2e-6,
-    "gamma": 0.95,
-    "buffer_size": 2e4,
-    "epsilon_min": 0.01,
-    "epsilon_max": 1.0,
-    "epsilon_decay_period": 500 * 200,
-    "epsilon_delay_decay": 8 * 200,
-    "batch_size": 64,
-    "monitoring_nb_trials": 0,
-    "nb_gradient_steps": 1,
-    "update_target_freq": 500,
-}
-
-
-def features(state):
-    # = np.array([self.T1, self.T1star, self.T2, self.T2star, self.V, self.E]) = static
+def feature(state):
     T1, T1star, T2, T2star, V, E = state
     p1 = T1 * V
     p2 = T2 * V
@@ -62,176 +67,166 @@ def features(state):
     return np.array([p1, p1star, p2, p2star, T1, T1star, T2, T2star, V, E])
 
 
+def features(states):
+    return np.apply_along_axis(feature, 1, states)
+
+
+class policyNetwork(nn.Module):
+    def __init__(self, nb_neurons=128):
+        super().__init__()
+        T1Upper = 1e6
+        T1starUpper = 5e4
+        T2Upper = 3200.0
+        T2starUpper = 80.0
+        VUpper = 2.5e5
+        EUpper = 353200.0
+        p1upper = 2.5000e11
+        p1starupper = 1.7660e10
+        p2upper = 8.0000e08
+        p2starupper = 2.8256e07
+        upper = torch.tensor(
+            np.array(
+                [
+                    p1upper,
+                    p1starupper,
+                    p2upper,
+                    p2starupper,
+                    T1Upper,
+                    T1starUpper,
+                    T2Upper,
+                    T2starUpper,
+                    VUpper,
+                    EUpper,
+                ]
+            )
+        ).float()
+        self.register_buffer(name="upper", tensor=upper)
+
+        state_dim = 10
+        n_action = 4
+        self.fc1 = nn.Linear(state_dim, nb_neurons)
+        self.fc2 = nn.Linear(nb_neurons, nb_neurons)
+        # self.fc3 = nn.Linear(nb_neurons, nb_neurons)
+        self.fc4 = nn.Linear(nb_neurons, n_action)
+
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(dim=0)
+        x = x / self.upper
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = F.relu(x)
+        # x = self.fc3(x)
+        # x = F.relu(x)
+        action_scores = self.fc4(x)
+        return F.softmax(action_scores, dim=1)
+
+    def sample_action(self, x):
+        probabilities = self.forward(x)
+        action_distribution = Categorical(probabilities)
+        return action_distribution.sample().item()
+
+    def sample_action_and_log_prob(self, x):
+        probabilities = self.forward(x)
+        action_distribution = Categorical(probabilities)
+        action = action_distribution.sample()
+        log_prob = action_distribution.log_prob(action)
+        return action, log_prob
+
+
+config = {
+    "nb_neurons": 128,
+    "lr": 1e-2,
+    "weight_decay": 0,  # 2e-6,
+    "gamma": 0.99,
+}
+
+
 class ProjectAgent:
 
-    def __init__(
-        self,
-    ):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        policy_network = policyNetwork(config["nb_neurons"]).to(self.device)
 
-        nb_neurons = config["nb_neurons"]
+        self.scalar_dtype = next(policy_network.parameters()).dtype
+        self.policy = policy_network
         self.gamma = config["gamma"]
-        self.batch_size = config["batch_size"]
-
-        self.network = torch.nn.Sequential(
-            nn.Linear(10, nb_neurons),
-            nn.ReLU(),
-            nn.Linear(nb_neurons, nb_neurons),
-            nn.ReLU(),
-            nn.Linear(nb_neurons, 4),
-        ).to(device)
-        self.target_network = deepcopy(self.network).to(device)
-
-        self.nb_gradient_steps = config["nb_gradient_steps"]
-        self.update_target_freq = config["update_target_freq"]
-
-        self.epsilon_max = config["epsilon_max"]
-        self.epsilon_min = config["epsilon_min"]
-        self.epsilon_stop = config["epsilon_decay_period"]
-        self.epsilon_delay = config["epsilon_delay_decay"]
-        self.epsilon_step = (self.epsilon_max - self.epsilon_min) / self.epsilon_stop
-
-        self.memory = ReplayBuffer(config["buffer_size"], device)
-        self.monitoring_nb_trials = config["monitoring_nb_trials"]
-
-        self.criterion = torch.nn.SmoothL1Loss()
         self.optimizer = torch.optim.Adam(
-            self.network.parameters(),
+            list(self.policy.parameters()),
             lr=config["lr"],
             weight_decay=config["weight_decay"],
         )
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer, step_size=20, gamma=0.9
+        )
 
-    def MC_eval(self, env, nb_trials):
-        MC_total_reward = []
-        MC_discounted_reward = []
-        for _ in range(nb_trials):
-            x, _ = env.reset()
-            done = False
-            trunc = False
-            total_reward = 0
-            discounted_reward = 0
-            step = 0
-            while not (done or trunc):
-                a = self.greedy_action(x)
-                y, r, done, trunc, _ = env.step(a)
-                x = y
-                total_reward += r
-                discounted_reward += self.gamma**step * r
-                step += 1
-            MC_total_reward.append(total_reward)
-            MC_discounted_reward.append(discounted_reward)
-        return np.mean(MC_discounted_reward), np.mean(MC_total_reward)
+    def one_gradient_step(self, env):
+        states = []
+        actions = []
+        log_probs = []
+        x, _ = env.reset()
+        x = features(x)
+        rewards = []
+        episode_cum_reward = np.zeros(N)
+        while True:
+            a, log_prob = self.policy.sample_action_and_log_prob(
+                torch.tensor(x).to(self.device)
+            )
+            a = a.detach().cpu().numpy()
+            log_probs.append(log_prob)
+            y, r, done, trunc, _ = env.step(a)
+            y = features(y)
+            states.append(x)
+            actions.append(a)
+            rewards.append(r)
+            episode_cum_reward += r
+            x = y
+            if done[0] or trunc[0]:
+                new_returns = []
+                G_t = np.zeros(N)
+                for r in reversed(rewards):
+                    G_t = r + self.gamma * G_t
+                    new_returns.append(G_t)
+                returns = np.flip(np.array(new_returns), axis=0)
+                break
+        # loss
+        returns = torch.tensor(returns.copy()).to(self.device)
+        returns = (returns - returns.mean(axis=1)[:, None]) / (
+            returns.std(axis=1)[:, None] + 1e-6
+        )
+        returns = returns.reshape(-1)
+        log_probs = torch.cat(log_probs).reshape(-1)
+        loss = -(returns * log_probs).mean()
+        # gradient step
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        self.scheduler.step()
+        return np.mean(episode_cum_reward), loss.item()
 
-    def gradient_step(self):
-        if len(self.memory) > self.batch_size:
-            X, A, R, Y, D = self.memory.sample(self.batch_size)
-            QYmax = self.network(Y).max(1)[0].detach()
-            update = torch.addcmul(R, 1 - D, QYmax, value=self.gamma)
-            QXA = self.network(X).gather(1, A.to(torch.long).unsqueeze(1))
-            loss = self.criterion(QXA, update.unsqueeze(1))
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
-    def greedy_action(self, state):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        with torch.no_grad():
-            Q = self.network(torch.Tensor(state).unsqueeze(0).to(device))
-            return torch.argmax(Q).item()
-
-    def train(self, env, max_episode):
-        logger.add("logs/train_{time}.log", rotation="50 MB", retention="3 days")
-        episode_return = []
-        MC_avg_total_reward = []
-        MC_avg_discounted_reward = []
-
-        episode = 0
-        episode_cum_reward = 0
-        state, _ = env.reset()
-        state = features(state)
-        epsilon = self.epsilon_max
-        step = 0
-
-        while episode < max_episode:
-            if step % 50 == 0:
-                logger.debug(
-                    "Episode - {episode:3} - Step {step:5} - Epsilon {epsilon:1.3f} - Episode_cum_reward {episode_cum_reward:1.3e}",
-                    episode=episode,
-                    step=step,
-                    epsilon=epsilon,
-                    episode_cum_reward=episode_cum_reward,
-                )
-            # update epsilon
-            if step > self.epsilon_delay:
-                epsilon = max(self.epsilon_min, epsilon - self.epsilon_step)
-
-            # select epsilon-greedy action
-            if np.random.rand() < epsilon:
-                action = env.action_space.sample()
-            else:
-                action = self.greedy_action(state)
-
-            # step
-            next_state, reward, done, trunc, _ = env.step(action)
-            next_state = features(next_state)
-            self.memory.append(state, action, reward, next_state, done)
-            episode_cum_reward += reward
-
-            # train
-            for _ in range(self.nb_gradient_steps):
-                self.gradient_step()
-            # update target network if needed
-            if step % self.update_target_freq == 0:
-                self.target_network.load_state_dict(self.network.state_dict())
-
-            # next transition
-            step += 1
-            if done or trunc:
-                if self.monitoring_nb_trials > 0:
-                    MC_dr, MC_tr = self.MC_eval(env, self.monitoring_nb_trials)
-                    MC_avg_total_reward.append(MC_tr)
-                    MC_avg_discounted_reward.append(MC_dr)
-                    episode_return.append(episode_cum_reward)
-                    logger.info(
-                        "Episode - {episode:3} - Epsilon {epsilon:1.3f} - Batch size {len:1.2e} - Episode return {episode_cum_reward:1.3e} - MC total reward {MC_tr:1.3e} - MC discounted reward {MC_dr:1.3e}",
-                        episode=episode,
-                        epsilon=epsilon,
-                        len=len(self.memory),
-                        episode_cum_reward=episode_cum_reward,
-                        MC_tr=MC_tr,
-                        MC_dr=MC_dr,
-                    )
-                else:
-                    episode_return.append(episode_cum_reward)
-                    logger.info(
-                        "Episode - {episode:3} - Epsilon {epsilon:1.3f} - Batch size {len:1.2e} - Episode return {episode_cum_reward:1.3e}",
-                        episode=episode,
-                        epsilon=epsilon,
-                        len=len(self.memory),
-                        episode_cum_reward=episode_cum_reward,
-                    )
-                episode += 1
-                state, _ = env.reset()
-                state = features(state)
-                episode_cum_reward = 0
-            else:
-                state = next_state
-
-        return episode_return, MC_avg_discounted_reward, MC_avg_total_reward
+    def train(self, env, nb_rollouts):
+        avg_sum_rewards = []
+        losses = []
+        for ep in range(nb_rollouts):
+            reward, loss = self.one_gradient_step(env)
+            print(f"Epoch {ep:3} - Reward {reward:1.3e}")
+            losses.append(loss)
+            avg_sum_rewards.append(reward)
+        return avg_sum_rewards, losses
 
     def act(self, observation, use_random=False):
-        obs = features(observation)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        obs = feature(observation)
         with torch.no_grad():
-            Q = self.network(torch.Tensor(obs).unsqueeze(0).to(device))
-            return torch.argmax(Q).item()
+            a = self.policy(torch.tensor(obs).to(self.device).float())
+            return torch.argmax(a).item()
 
     def save(self, path):
         # path = "models/agent.pth"
-        torch.save(self.network.state_dict(), path)
+        torch.save(self.policy.state_dict(), path)
 
     def load(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.network.load_state_dict(
+        self.policy.load_state_dict(
             torch.load("models/agent.pth", map_location=torch.device(device))
         )
